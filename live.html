@@ -204,10 +204,51 @@ const ROOM_CENTERS=[1070,2420,3770,5120,6470,7820,9170,10520,11870];
  const CIRCUIT_GEOMETRIES=['SPIRALES ET COURBES','CHICANES ANGULEUSES','MÉANDRES ET ÉCLUSES'];
  let trackMirror=1,chosenCircuit=0,activeCircuit=0,rotateCircuits=true,windZones=[],lastZoneAlert=-1, cameraTarget=0, cameraZoom=1, startSlots=[];
 let modules=[],dividers=[],railBars=[],forks=[],rotors=[],movingBumpers=[],turboPads=[],giftBumpers=[],funnelWalls=[],funnels=[],arenaRails=[],seesaws=[],chamberVisits=[0,0,0],chamberHits=[0,0,0],chaosEnd=0,lastLeader=-1,lastLeadChange=-10,leadChanges=0,lateChanges=0,giftTargets=0,stimulated=new Map(),rngOverride=null;
-const $=id=>document.getElementById(id), cv=$('game'),c=cv.getContext('2d',{alpha:false});
-// Physical backing store is Full HD (1080 x 1920); world-space game math
-// deliberately remains in its original 450 x 800 logical coordinate system.
-const RENDER_SCALE=1080/W;
+const $=id=>document.getElementById(id), cv=$('game');
+// The broadcast output is ALWAYS 1080x1920. Heavy scene painting happens
+// on a separate adaptive-resolution surface, then is composited into Full HD.
+// Gameplay physics, coordinates, and collision radii remain 450x800.
+const OUTPUT_W=1080,OUTPUT_H=1920;
+const output=cv.getContext('2d',{alpha:false,desynchronized:true});
+const scene=document.createElement('canvas');
+const c=scene.getContext('2d',{alpha:false,desynchronized:true});
+const qualityLevels=[630,720,810,900,1080];
+const qualityArg=new URLSearchParams(location.search).get('quality')||'auto';
+const fixedQuality={low:630,medium:720,high:900,ultra:1080,'630':630,'720':720,'810':810,'900':900,'1080':1080}[qualityArg]||null;
+let qualityIndex=fixedQuality===null?1:Math.max(0,qualityLevels.indexOf(fixedQuality));
+let RENDER_SCALE=qualityLevels[qualityIndex]/W;
+let graphicsDt=1/60,qualityFrameTimes=[],qualityLastCheck=performance.now(),qualityLastChange=performance.now(),qualityFPS=0;
+function applyRenderQuality(nextIndex){
+ qualityIndex=Math.max(0,Math.min(qualityLevels.length-1,nextIndex));
+ const w=qualityLevels[qualityIndex];
+ scene.width=w;scene.height=Math.round(w*H/W);
+ RENDER_SCALE=w/W;
+ c.imageSmoothingEnabled=true;
+ qualityLastChange=performance.now();
+}
+applyRenderQuality(qualityIndex);
+output.imageSmoothingEnabled=true;
+output.imageSmoothingQuality='medium';
+function trackFramePacing(dt,now){
+ if(fixedQuality!==null || dt<=0 || dt>.22)return;
+ qualityFrameTimes.push(dt);
+ if(qualityFrameTimes.length>180)qualityFrameTimes.shift();
+ if(now-qualityLastCheck<3000 || qualityFrameTimes.length<35)return;
+ const vals=[...qualityFrameTimes].sort((a,b)=>a-b);
+ const mid=vals[Math.floor(vals.length*.50)],p80=vals[Math.floor(vals.length*.80)];
+ qualityFPS=1/Math.max(mid,.001);
+ qualityFrameTimes.length=0;qualityLastCheck=now;
+ if(now-qualityLastChange<4800)return;
+ // Hysteresis: lower quality promptly on overloaded machines, upscale slowly
+ // only when the host has enough spare time for stable 60 Hz animation.
+ if(p80>.030 && qualityIndex>0)applyRenderQuality(qualityIndex-1);
+ else if(mid<.0185 && p80<.021 && qualityIndex<qualityLevels.length-1 && now-qualityLastChange>10000)applyRenderQuality(qualityIndex+1);
+}
+function presentFrame(){
+ output.setTransform(1,0,0,1,0,0);
+ output.drawImage(scene,0,0,OUTPUT_W,OUTPUT_H);
+}
+
 function fitBroadcastToSource(){
  if(!document.body.classList.contains('live-only'))return;
  const frame=$('screen'),inner=$('screenInner');
@@ -1565,11 +1606,11 @@ function render(){
  const front=[...ys].sort((a,b)=>b-a);
  const frontGap=front.length>1?front[0]-front[1]:0;
  const goalZoom=clamp(238/Math.max(238,frontGap+68),.76,1);
- cameraZoom+=(goalZoom-cameraZoom)*(state==='RACING'?.055:.10);
+ cameraZoom+=(goalZoom-cameraZoom)*(1-Math.pow(1-(state==='RACING'?.055:.10),graphicsDt*60));
  // Keep the leader above the TikTok comment band (which begins near canvas y=448).
  const targetLeadY=371;
  const desired=clamp(high-H*.5-(targetLeadY-H*.5)/Math.max(.76,cameraZoom),0,FINISH-H+390);
- camera+=(desired-camera)*(state==='RACING'?.13:.18);
+ camera+=(desired-camera)*(1-Math.pow(1-(state==='RACING'?.13:.18),graphicsDt*60));
  camera=clamp(camera,0,FINISH-H+390);
  c.setTransform(RENDER_SCALE,0,0,RENDER_SCALE,0,0);background();c.save();
  const sx=debug?rand(-shake,shake):rand(-shake*.65,shake*.65),sy=rand(-shake*.35,shake*.35);
@@ -1578,8 +1619,8 @@ function render(){
  paintEnvironment();paintTrack();paintStartChute();paintWind();paintFinalSprint();paintModules();paintForks();paintSignatureMachines();for(let p of bumpers){if(Math.abs(p.y-(camera+400))<520)paintBumper(p)}for(let h of hammers){if(Math.abs(h.ay-(camera+400))<620)paintHammer(h)}if(FINISH>camera-100&&FINISH<camera+H+1400)finishLine();
 for(let p of rings){c.save();c.globalAlpha=p.life/.32;c.strokeStyle=p.col;c.lineWidth=3;c.beginPath();c.arc(p.x,p.y,p.r,0,Math.PI*2);c.stroke();c.restore()}for(let p of particles){c.globalAlpha=clamp(p.life/p.max,0,1);c.fillStyle=p.col;c.beginPath();c.arc(p.x,p.y,2.5,0,Math.PI*2);c.fill()}c.globalAlpha=1;const visualLeaderId=(state==='RACING'||state==='PAUSED')&&finished.length===0
  ? balls.filter(b=>!b.done).reduce((a,b)=>!a||b.y>a.y?b:a,null)?.id : null;
-for(let b of balls){if(!b.done)drawBall(b,b.id===visualLeaderId);}c.restore();paintClarityMarkers();paintOffscreen();if(state==='READY'){c.fillStyle='#081e1e50';c.fillRect(0,220,W,80);c.textAlign='center';c.fillStyle='#fff0bd';c.font='950 24px system-ui';c.fillText('PRÊT POUR LE DÉPART',225,267)}if(state==='PAUSED'){c.fillStyle='#071e21bb';c.fillRect(0,0,W,H);c.textAlign='center';c.fillStyle='#f8e5b5';c.font='950 35px system-ui';c.fillText('EN PAUSE',W/2,H/2)}}
-function loop(now){try{let dt=clamp((now-last)/1000,0,.07);last=now;if(state==='CHOOSING'){tickSelection(now);acc=0;}if(state==='COUNTDOWN'){tickCountdown(now);acc=0;}if(state==='RACING'){acc+=dt;let ticks=0;while(acc>=STEP&&ticks<10){step(STEP);acc-=STEP;ticks++}if(ticks>=10)acc=0}else if(state==='RESULTS'){acc=0;time+=dt;const remain=Math.max(0,Math.ceil(5-(time-resultsAt)));const label=$('nextCountdown');if(label)label.textContent='Relance dans '+remain+' s';if(time-resultsAt>5)next();}else acc=0;
+for(let b of balls){if(!b.done)drawBall(b,b.id===visualLeaderId);}c.restore();paintClarityMarkers();paintOffscreen();if(state==='READY'){c.fillStyle='#081e1e50';c.fillRect(0,220,W,80);c.textAlign='center';c.fillStyle='#fff0bd';c.font='950 24px system-ui';c.fillText('PRÊT POUR LE DÉPART',225,267)}if(state==='PAUSED'){c.fillStyle='#071e21bb';c.fillRect(0,0,W,H);c.textAlign='center';c.fillStyle='#f8e5b5';c.font='950 35px system-ui';c.fillText('EN PAUSE',W/2,H/2)}presentFrame();}
+function loop(now){try{const fullDt=Math.max(0,(now-last)/1000);let dt=clamp(fullDt,0,.07);last=now;graphicsDt=clamp(fullDt,1/120,.085);trackFramePacing(fullDt,now);if(state==='CHOOSING'){tickSelection(now);acc=0;}if(state==='COUNTDOWN'){tickCountdown(now);acc=0;}if(state==='RACING'){acc+=dt;let ticks=0;while(acc>=STEP&&ticks<10){step(STEP);acc-=STEP;ticks++}if(ticks>=10)acc=0}else if(state==='RESULTS'){acc=0;time+=dt;const remain=Math.max(0,Math.ceil(5-(time-resultsAt)));const label=$('nextCountdown');if(label)label.textContent='Relance dans '+remain+' s';if(time-resultsAt>5)next();}else acc=0;
  if(goOverlayUntil&&now>goOverlayUntil){cancelCountDisplay();}
  if(leaderToastExpiry&&time>leaderToastExpiry)hideLeaderToast();
  if(audio){syncAudioMix();stepAmbientMusic();}
@@ -1614,7 +1655,7 @@ $('demoJoin').onclick=async()=>{
  }else{joinSpectator({userId:'demo:'+name.toLowerCase(),name,choice});setBridgeMode('Simulation locale — pas de connexion TikTok',false,'DEMO');}
 };
 paintChampionship();updateSpectators();connectBridge();
-window.__bambooV47=window.__bambooV468=window.__bambooV467=window.__bambooV465=window.__bambooV464=window.__bambooV463=window.__bambooV462=window.__bambooV461=window.__bambooV46=window.__bambooV4513=window.__bambooV4512=window.__bambooV4511=window.__bambooV4510=window.__bambooV459=window.__bambooV458=window.__bambooV457=window.__bambooV456=window.__bambooV454=window.__bambooV451=window.__bambooV45=window.__bambooV44=window.__bambooV43=window.__bambooV42=window.__bambooV3={getAudioState:()=>({sound,volume:soundVolume,sfxVolume,musicVolume,countdownSecond,chooseSeconds,ambientChordCount,musicCircuit,hasContext:!!audio,contextState:audio?.state||'absent',diagnostics:JSON.parse(JSON.stringify(audioDiagnostics)),mix:audioMix?{master:audioMix.master.gain.value,music:audioMix.music.gain.value,sfx:audioMix.sfx.gain.value,ui:audioMix.ui.gain.value}:null}),getChampionship:()=>JSON.parse(JSON.stringify(champ)),getParticipation:()=>({mode:bridgeMode,online:bridgeOnline,teams:teamNumbers(),members:spectatorTeams.size,raceSupporters:[...raceSupporters],latestJoined,round,phase:state}),testJoin:joinSpectator,resetChampionship,importChampionship,exportChampionship:()=>JSON.stringify({app:"Bamboo Cup",championship:champ}),getState:()=>({state,time,round,chooseSeconds,countdownSecond,mode,circuit:activeCircuit,circuitName:COURSES[activeCircuit].name,collisionCounts:{...collisionCounts},balls:balls.map(b=>({id:b.id,x:b.x,y:b.y,vx:b.vx,vy:b.vy,done:b.done,finishTime:b.finishTime,contacts:b.contacts})),finished:[...finished],firstFinisherAt,resultsAt,podiumVisible:$('resultPanel').classList.contains('active'),leadChanges,lateChanges,modules:modules.map(m=>m.type),chamberVisits:[...chamberVisits],seesaws:seesaws.map(s=>({ang:s.ang,velocity:s.velocity})),startSlots:[...startSlots],trackMirror,railBars:railBars.length,forks:forks.map(f=>({y:f.y,risky:f.risky,index:f.index})),routes:balls.map(b=>({...b.forkRoutes})),choiceGates:hammers.filter(h=>h.id.startsWith("choiceGate")).length,rotorsCount:rotors.length,windZones:windZones.map(w=>({...w})),sluiceGates:hammers.filter(h=>h.id.startsWith("sluiceGate")).length,hammerCount:hammers.filter(h=>h.type==="hammer").length,camera,cameraZoom,screenYs:balls.map(b=>H*.5+cameraZoom*(b.y-camera-H*.5)),funnelPositions:funnels.map(f=>({x:f.x,y:f.y})),funnelVisits:balls.map(b=>b.funnelVisit||false),funnelStrengths:funnels.map(f=>Math.abs(f.spin)),minBallClearance:Math.min(...balls.flatMap((b,i)=>balls.slice(i+1).filter(other=>!b.done&&!other.done).map(other=>Math.hypot(b.x-other.x,b.y-other.y)-b.r-other.r)),Infinity),unsticks:balls.map(b=>b.unstickCount),unstickRecords:balls.map(b=>b.unstickRecords),frameErrors}),renderFrame:render,launch,pause,restart:init,stepFor:(n=1)=>{if(state==='READY')launch(true);for(let i=0;i<n;i++)step(STEP);renderHUD()},testBalls,testHammer,impulse,sendGift,runRace:(maxSteps=8000)=>{if(state==='READY')launch(true);let n=0;for(;n<maxSteps&&state==='RACING';n++)step(STEP);renderHUD();return {ticks:n,...window.__bambooV3.getState()}},setSeed:v=>{rngOverride=v===null?null:(v>>>0)},selectCircuit:i=>{chosenCircuit=activeCircuit=clamp(i|0,0,2);round++;init()},setAutoCircuits:v=>{rotateCircuits=!!v;$('rotateCircuits').checked=rotateCircuits},showDebug:v=>debug=!!v};
+window.__bambooV472=window.__bambooV47=window.__bambooV468=window.__bambooV467=window.__bambooV465=window.__bambooV464=window.__bambooV463=window.__bambooV462=window.__bambooV461=window.__bambooV46=window.__bambooV4513=window.__bambooV4512=window.__bambooV4511=window.__bambooV4510=window.__bambooV459=window.__bambooV458=window.__bambooV457=window.__bambooV456=window.__bambooV454=window.__bambooV451=window.__bambooV45=window.__bambooV44=window.__bambooV43=window.__bambooV42=window.__bambooV3={getGraphicsState:()=>({output:[cv.width,cv.height],scene:[scene.width,scene.height],quality:qualityLevels[qualityIndex],fixed:fixedQuality!==null,measuredFPS:qualityFPS,physicsHz:120}),setRenderQuality:w=>applyRenderQuality(qualityLevels.indexOf(w)<0?0:qualityLevels.indexOf(w)),getAudioState:()=>({sound,volume:soundVolume,sfxVolume,musicVolume,countdownSecond,chooseSeconds,ambientChordCount,musicCircuit,hasContext:!!audio,contextState:audio?.state||'absent',diagnostics:JSON.parse(JSON.stringify(audioDiagnostics)),mix:audioMix?{master:audioMix.master.gain.value,music:audioMix.music.gain.value,sfx:audioMix.sfx.gain.value,ui:audioMix.ui.gain.value}:null}),getChampionship:()=>JSON.parse(JSON.stringify(champ)),getParticipation:()=>({mode:bridgeMode,online:bridgeOnline,teams:teamNumbers(),members:spectatorTeams.size,raceSupporters:[...raceSupporters],latestJoined,round,phase:state}),testJoin:joinSpectator,resetChampionship,importChampionship,exportChampionship:()=>JSON.stringify({app:"Bamboo Cup",championship:champ}),getState:()=>({state,time,round,chooseSeconds,countdownSecond,mode,circuit:activeCircuit,circuitName:COURSES[activeCircuit].name,collisionCounts:{...collisionCounts},balls:balls.map(b=>({id:b.id,x:b.x,y:b.y,vx:b.vx,vy:b.vy,done:b.done,finishTime:b.finishTime,contacts:b.contacts})),finished:[...finished],firstFinisherAt,resultsAt,podiumVisible:$('resultPanel').classList.contains('active'),leadChanges,lateChanges,modules:modules.map(m=>m.type),chamberVisits:[...chamberVisits],seesaws:seesaws.map(s=>({ang:s.ang,velocity:s.velocity})),startSlots:[...startSlots],trackMirror,railBars:railBars.length,forks:forks.map(f=>({y:f.y,risky:f.risky,index:f.index})),routes:balls.map(b=>({...b.forkRoutes})),choiceGates:hammers.filter(h=>h.id.startsWith("choiceGate")).length,rotorsCount:rotors.length,windZones:windZones.map(w=>({...w})),sluiceGates:hammers.filter(h=>h.id.startsWith("sluiceGate")).length,hammerCount:hammers.filter(h=>h.type==="hammer").length,camera,cameraZoom,screenYs:balls.map(b=>H*.5+cameraZoom*(b.y-camera-H*.5)),funnelPositions:funnels.map(f=>({x:f.x,y:f.y})),funnelVisits:balls.map(b=>b.funnelVisit||false),funnelStrengths:funnels.map(f=>Math.abs(f.spin)),minBallClearance:Math.min(...balls.flatMap((b,i)=>balls.slice(i+1).filter(other=>!b.done&&!other.done).map(other=>Math.hypot(b.x-other.x,b.y-other.y)-b.r-other.r)),Infinity),unsticks:balls.map(b=>b.unstickCount),unstickRecords:balls.map(b=>b.unstickRecords),frameErrors}),renderFrame:render,launch,pause,restart:init,stepFor:(n=1)=>{if(state==='READY')launch(true);for(let i=0;i<n;i++)step(STEP);renderHUD()},testBalls,testHammer,impulse,sendGift,runRace:(maxSteps=8000)=>{if(state==='READY')launch(true);let n=0;for(;n<maxSteps&&state==='RACING';n++)step(STEP);renderHUD();return {ticks:n,...window.__bambooV3.getState()}},setSeed:v=>{rngOverride=v===null?null:(v>>>0)},selectCircuit:i=>{chosenCircuit=activeCircuit=clamp(i|0,0,2);round++;init()},setAutoCircuits:v=>{rotateCircuits=!!v;$('rotateCircuits').checked=rotateCircuits},showDebug:v=>debug=!!v};
 init();requestAnimationFrame(loop);
 // Dedicated broadcast entrypoint: start selection automatically without a user click.
 // WebAudio may stay suspended by Chromium's autoplay policy; retry after a real gesture.
